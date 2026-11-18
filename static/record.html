@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="uz">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Faoliyat yozish</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 480px; margin: 0 auto; padding: 16px; }
+  select, button { width: 100%; font-size: 1.2rem; padding: 14px; margin: 8px 0; }
+  button { background: #2563eb; color: #fff; border: 0; border-radius: 8px; }
+  #status { min-height: 3em; }
+  pre { background: #f3f4f6; padding: 10px; border-radius: 8px; }
+  small { color: #555; }
+</style>
+</head>
+<body>
+<h1>Faoliyat yozish</h1>
+
+<label for="activity">Hozir nima qilyapsiz?</label>
+<select id="activity">
+  <option value="sitting">O'tirish</option>
+  <option value="standing">Turish</option>
+  <option value="walking">Yurish</option>
+  <option value="stairs_up">Zinadan yuqoriga</option>
+  <option value="stairs_down">Zinadan pastga</option>
+</select>
+
+<button id="btn">Start</button>
+<p id="status"></p>
+<pre id="stats"></pre>
+
+<small>
+  Saqlanadi: sensor qiymatlari, tanlangan faoliyat, tasodifiy ID va telefon turi.
+  Ism, telefon raqam yoki joylashuv saqlanmaydi. Maqsad: faoliyatni taniydigan model o'qitish.
+</small>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const ACTIVITIES = ["sitting", "standing", "walking", "stairs_up", "stairs_down"];
+
+let buffer = [], timer = null, startTimer = null;
+let running = false, sent = 0, sessionId = "", wakeLock = null;
+
+function newId() {
+  return crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2) + Date.now();
+}
+
+function getUserId() {
+  let id = null;
+  try { id = localStorage.getItem("user_id"); } catch (e) {}
+  if (!id) {
+    id = newId();
+    try { localStorage.setItem("user_id", id); } catch (e) {}
+  }
+  return id;
+}
+const userId = getUserId();
+
+function setStatus(t) { $("status").textContent = t; }
+
+async function askPermission() {
+  // iPhone: ruxsat so'rash shart. Android: shart emas.
+  if (typeof DeviceMotionEvent !== "undefined" &&
+      typeof DeviceMotionEvent.requestPermission === "function") {
+    const r = await DeviceMotionEvent.requestPermission();
+    return r === "granted";
+  }
+  return true;
+}
+
+async function keepAwake() {
+  try { wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {}
+}
+
+function onMotion(e) {
+  const a = e.accelerationIncludingGravity;
+  if (!a || a.x === null) return;
+  buffer.push([e.timeStamp, a.x, a.y, a.z]);
+}
+
+async function flush() {
+  const samples = buffer;
+  buffer = [];
+  if (samples.length < 20) {
+    setStatus("Sensor ma'lumoti deyarli kelmayapti. Sahifa HTTPS ekanini va ruxsat berilganini tekshiring.");
+    return;
+  }
+  try {
+    const r = await fetch("/api/windows", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: userId,
+        session_id: sessionId,
+        label: $("activity").value,
+        samples: samples,
+        user_agent: navigator.userAgent,
+      }),
+    });
+    if (r.ok) {
+      sent++;
+      setStatus("Yozilmoqda... yuborilgan oynalar: " + sent);
+    } else {
+      const err = await r.json();
+      setStatus("Server rad etdi: " + (typeof err.detail === "string" ? err.detail : JSON.stringify(err.detail)));
+    }
+  } catch (e) {
+    setStatus("Serverga ulanib bo'lmadi.");
+  }
+}
+
+async function start() {
+  const ok = await askPermission();
+  if (!ok) { setStatus("Sensor ruxsati berilmadi."); return; }
+  running = true;
+  sent = 0;
+  sessionId = newId();
+  $("btn").textContent = "Stop";
+  $("activity").disabled = true;
+  keepAwake();
+  setStatus("5 soniyadan keyin yozish boshlanadi. Telefonni joylashtiring.");
+  startTimer = setTimeout(() => {
+    buffer = [];
+    window.addEventListener("devicemotion", onMotion);
+    timer = setInterval(flush, 2000);
+    setStatus("Yozilmoqda...");
+  }, 5000);
+}
+
+function stop() {
+  clearTimeout(startTimer);
+  clearInterval(timer);
+  window.removeEventListener("devicemotion", onMotion);
+  if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+  running = false;
+  $("btn").textContent = "Start";
+  $("activity").disabled = false;
+  setStatus("To'xtatildi. Yuborilgan oynalar: " + sent);
+  loadStats();
+}
+
+async function loadStats() {
+  try {
+    const s = await (await fetch("/api/stats")).json();
+    const lines = ACTIVITIES.map((a) => {
+      const x = s.by_label[a] || { windows: 0, sessions: 0 };
+      return a + ": " + x.windows + " oyna, " + x.sessions + " sessiya";
+    });
+    lines.push("Odamlar soni: " + s.users);
+    $("stats").textContent = lines.join("\n");
+  } catch (e) {}
+}
+
+$("btn").onclick = () => (running ? stop() : start());
+loadStats();
+</script>
+</body>
+</html>
